@@ -116,4 +116,4 @@ pdf-word-substituter/
 
 ## License
 
-MIT
+[MIT](LICENSE) © Nahuel Seoane
