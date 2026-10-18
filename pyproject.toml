@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 pdf-word-substituter = "pdf_word_substituter:main"
+pdf-word-substituter-gui = "pdf_word_substituter.gui:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

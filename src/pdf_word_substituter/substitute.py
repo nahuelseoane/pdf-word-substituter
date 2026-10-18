@@ -27,8 +27,8 @@ y_offset = 0
 def choose_fallback_font(original_font_name: str) -> str:
     name = original_font_name.lower()
 
-    # Helvetica family
-    if "helvetica" in name:
+    # Helvetica family (Arial has the same letter widths)
+    if "helvetica" in name or "arial" in name:
         if "bold" in name and ("oblique" in name or "italic" in name):
             return "hebi"
         elif "bold" in name:
@@ -106,6 +106,8 @@ def replace_texts(
     were changed and how many were skipped because an earlier rule already
     changed that text. Nothing is saved if no rule matched.
     """
+    if Path(output_path).resolve() == Path(pdf_path).resolve():
+        raise ValueError("The output file must be different from the original PDF.")
     doc = pymupdf.open(pdf_path)
     counts = [0] * len(rules)
     skipped = [0] * len(rules)
@@ -164,23 +166,46 @@ def replace_text(
     return counts[0]
 
 
-def read_rules_file(path_arg: str) -> list[tuple[str, str]]:
-    """Read rules, one per line: "old => new", or "old" alone to remove it.
+def parse_rules(text: str) -> list[tuple[str, str]]:
+    """Parse rules, one per line: "old => new", or "old" alone to remove it.
 
     Blank lines and lines starting with # are ignored. Spaces around each
     side are trimmed.
     """
-    path = Path(path_arg)
-    if not path.exists():
-        sys.exit(f"Rules file not found: {path_arg}")
     rules = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         old, _, new = line.partition("=>")
         if old.strip():
             rules.append((old.strip(), new.strip()))
     return rules
+
+
+def read_rules_file(path_arg: str) -> list[tuple[str, str]]:
+    path = Path(path_arg)
+    if not path.exists():
+        sys.exit(f"Rules file not found: {path_arg}")
+    return parse_rules(path.read_text(encoding="utf-8"))
+
+
+def summarize(
+    rules: list[tuple[str, str]], counts: list[int], skipped: list[int]
+) -> tuple[list[str], int]:
+    """One report line per rule, plus how many rules weren't found."""
+    lines = []
+    missing = 0
+    for (old, new), count, skip in zip(rules, counts, skipped):
+        if not count and skip:
+            lines.append(f'skipped    "{old}" (already changed by an earlier rule)')
+        elif not count:
+            missing += 1
+            lines.append(f'NOT FOUND  "{old}"')
+        elif new:
+            lines.append(f'replaced   "{old}" -> "{new}" ({count}x)')
+        else:
+            lines.append(f'removed    "{old}" ({count}x)')
+    return lines, missing
 
 
 def main() -> None:
@@ -242,19 +267,14 @@ def main() -> None:
         else pdf_path.with_name(f"{pdf_path.stem}_updated.pdf")
     )
 
-    counts, skipped = replace_texts(pdf_path, output_path, rules, args.ignore_case)
+    try:
+        counts, skipped = replace_texts(pdf_path, output_path, rules, args.ignore_case)
+    except ValueError as e:
+        sys.exit(str(e))
 
-    missing = 0
-    for (old, new), count, skip in zip(rules, counts, skipped):
-        if not count and skip:
-            print(f'  skipped    "{old}" (already changed by an earlier rule)')
-        elif not count:
-            missing += 1
-            print(f'  NOT FOUND  "{old}"')
-        elif new:
-            print(f'  replaced   "{old}" -> "{new}" ({count}x)')
-        else:
-            print(f'  removed    "{old}" ({count}x)')
+    lines, missing = summarize(rules, counts, skipped)
+    for line in lines:
+        print(f"  {line}")
 
     if not any(counts):
         sys.exit(

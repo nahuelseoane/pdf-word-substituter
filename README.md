@@ -12,6 +12,8 @@ Need several changes? Repeat `-r OLD NEW` (replace) and `-d TEXT` (remove), or l
 uv run pdf-word-substituter receipt.pdf -r "Pilates" "Yoga" -d "Saldo de la cta cte: ARS -1.000,00"
 ```
 
+Prefer clicking to typing? Open the [window](#window): `uv run pdf-word-substituter-gui`.
+
 Unlike tools that paint a white box over the old text, this one **deletes it from the file**. Once it's removed, nobody can find it with a search, select it, copy it, or recover it from hidden data inside the PDF. That makes it safe for hiding sensitive details such as balances, account numbers or names before sharing a document.
 
 ---
@@ -20,6 +22,7 @@ Unlike tools that paint a white box over the old text, this one **deletes it fro
 
 - **Replace** a word or phrase with new text, or **remove** it completely.
 - **Several changes in one run**, from the command line or from a rules file.
+- **Simple window** if you'd rather not use the terminal.
 - **Removes the old text for real**: removed text is deleted, along with any leftover copies inside the file.
 - **Matches the original style**: keeps the font size and the closest standard font (Helvetica, Times or Courier), and places the new text on the same line as the old one.
 - **Never touches the original**: the result is saved as a new file, `<name>_updated.pdf`.
@@ -124,6 +127,19 @@ WARNING: 1 rule(s) not found; the rest were applied.
 
 If some text isn't found, the rest is still applied and saved, but the command ends with a warning (and exit code 1) so a typo doesn't go unnoticed. If nothing is found, nothing is saved.
 
+### Window
+
+```bash
+uv run pdf-word-substituter-gui
+```
+
+1. **Browse...** to pick the PDF. The "Save as" name is filled in for you (`<name>_updated.pdf`).
+2. Type what to **Find** and what to **Replace with**. Leave "Replace with" empty to remove the text.
+3. **+ Add change** for more lines, or **Load rules file...** to fill them from a [rules file](#rules-file).
+4. Click **Apply changes**. The result appears at the bottom: green if everything was found, orange if some text wasn't (the rest is still saved), red if nothing was found (nothing is saved).
+
+On WSL the window opens through WSLg (Windows 11), with no extra setup.
+
 ### Tips
 
 - The search is **exact**: spaces, accents and capital letters must match (use `-i` to ignore capitals). If you're not sure, copy the text straight from the PDF viewer.
@@ -156,16 +172,16 @@ If some text isn't found, the rest is still applied and saved, but the command e
 pdf-word-substituter/
 ├── src/pdf_word_substituter/
 │   ├── __init__.py
-│   └── substitute.py    # All the logic and the command-line interface
+│   ├── substitute.py    # All the logic and the command-line interface
+│   └── gui.py           # The window (Tkinter)
 ├── script.py            # Shortcut for `uv run python script.py`
-├── pyproject.toml       # Dependencies and the `pdf-word-substituter` command
+├── pyproject.toml       # Dependencies and the two commands
 └── uv.lock
 ```
 
 ## Ideas for later
 
 - Embedding the original font instead of the closest standard one.
-- A simple graphical interface.
 
 ## License
 
