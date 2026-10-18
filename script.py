@@ -1,20 +1,25 @@
-import fitz  # PyMuPDF
+"""Replace (or remove) text in a PDF.
 
-file_name = "Flavia Pilates Octubre 2026"
-pdf_path = f"/mnt/c/Users/jnahu/Downloads/{file_name}.pdf"
-new_file_name = "Flavia Pilates Octubre 2026_updated"
-output_path = f"/mnt/c/Users/jnahu/Downloads/{new_file_name}.pdf"
+Usage:
+    uv run python script.py "Flavia Pilates Octubre 2026.pdf" "Saldo de la cta cte: ARS -35.344.754,00"
+    uv run python script.py fc.pdf "ABONO SERVICIO DE" "SERVICIO DE LIMPIEZA"
 
-text_to_replace = "Saldo de la cta cte: ARS -35.344.754,00"
-replacement_text = ""  # empty = remove the text completely
+If the replacement is left out, the text is removed. If the PDF isn't found
+as given, it is looked up in DEFAULT_FOLDER. The result is saved next to the
+original as "<name>_updated.pdf" unless -o is given.
+"""
 
-doc = fitz.open(pdf_path)
+import argparse
+import sys
+from pathlib import Path
 
-# Default values
-font_name = "helv"
-font_size = 8
+import pymupdf
+
+DEFAULT_FOLDER = Path("/mnt/c/Users/jnahu/Downloads")
+
+# Fine-tune where the replacement text lands (0 = same spot as the old text)
 x_offset = 0
-y_offset = 6
+y_offset = 0
 
 
 def choose_fallback_font(original_font_name: str) -> str:
@@ -53,71 +58,89 @@ def choose_fallback_font(original_font_name: str) -> str:
     return "helv"
 
 
-for page in doc:
-    text_instances = page.search_for(text_to_replace)
+def find_span(page: pymupdf.Page, rect: pymupdf.Rect) -> dict | None:
+    """Return the text span (font, size, baseline) that the found text is in."""
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if span["text"].strip() and rect.intersects(span["bbox"]):
+                    return span
+    return None
 
-    # Blank replacement: delete the text from the PDF instead of covering it,
-    # so it can't be selected or copied afterwards.
-    if not replacement_text:
-        for inst in text_instances:
-            page.add_redact_annot(inst, fill=(1, 1, 1))
-        page.apply_redactions()
-        continue
 
-    for inst in text_instances:
-        rect = fitz.Rect(inst)
+def resolve_input(path_arg: str) -> Path:
+    path = Path(path_arg)
+    if path.suffix.lower() != ".pdf":
+        path = path.with_name(path.name + ".pdf")
+    if not path.exists() and not path.is_absolute():
+        path = DEFAULT_FOLDER / path
+    if not path.exists():
+        sys.exit(f"PDF not found: {path_arg}")
+    return path
 
-        detected_font_name = "helv"
-        detected_font_size = 8
 
-        text_info = page.get_text("dict")
-        found = False
+def replace_text(pdf_path: Path, output_path: Path, old: str, new: str) -> None:
+    doc = pymupdf.open(pdf_path)
 
-        for block in text_info["blocks"]:
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    if text_to_replace in span["text"]:
-                        detected_font_name = span["font"]
-                        detected_font_size = span["size"]
-                        found = True
-                        break
-                if found:
-                    break
-            if found:
-                break
+    for page in doc:
+        rects = page.search_for(old)
+        if not rects:
+            continue
 
-        # Erase old text
-        erase_top = 0
-        erase_bottom = 2
-        erase_left = 0
-        erase_right = 0
+        # Read font and position before deleting, while the old text still exists
+        spans = [find_span(page, rect) for rect in rects]
 
-        erase_rect = fitz.Rect(
-            rect.x0 + erase_left,
-            rect.y0 + erase_top,
-            rect.x1 - erase_right,
-            rect.y1 - erase_bottom,
-        )
-        page.draw_rect(erase_rect, color=(1, 1, 1), fill=(1, 1, 1))
-
-        # Try to preserve the original style as much as possible
-        font_name = choose_fallback_font(detected_font_name)
-        font_size = detected_font_size
-
-        print(f"Detected PDF font: {detected_font_name} -> Using: {font_name}")
-
-        x, y = inst[:2]
-        page.insert_text(
-            (x + x_offset, y + y_offset),
-            replacement_text,
-            fontsize=font_size,
-            fontname=font_name,
-            color=(0, 0, 0),
+        # Delete the old text from the PDF itself (not just cover it), so it
+        # can't be found, selected or copied. Images and lines are left alone.
+        for rect in rects:
+            page.add_redact_annot(rect, fill=False)
+        page.apply_redactions(
+            images=pymupdf.PDF_REDACT_IMAGE_NONE,
+            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
         )
 
-# garbage=4 drops unused objects (like the old, pre-redaction page content),
-# otherwise removed text can still be recovered from the file.
-doc.save(output_path, garbage=4, deflate=True, clean=True)
-doc.close()
+        if not new:
+            continue
+        for rect, span in zip(rects, spans):
+            detected_font = span["font"] if span else "helv"
+            font_size = span["size"] if span else 8
+            baseline = span["origin"][1] if span else rect.y1 - 2
+            font_name = choose_fallback_font(detected_font)
+            print(f"Detected PDF font: {detected_font} -> Using: {font_name}")
+            page.insert_text(
+                (rect.x0 + x_offset, baseline + y_offset),
+                new,
+                fontsize=font_size,
+                fontname=font_name,
+                color=(0, 0, 0),
+            )
 
-print(f"Text replacement completed. Updated PDF saved as {output_path}")
+    # garbage=4 drops unused objects (like the old, pre-redaction page content),
+    # otherwise removed text can still be recovered from the file.
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
+    doc.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Replace or remove text in a PDF.")
+    parser.add_argument("pdf", help="PDF file (name or path)")
+    parser.add_argument("text", help="exact text to find")
+    parser.add_argument(
+        "replacement", nargs="?", default="", help="new text (omit to remove)"
+    )
+    parser.add_argument("-o", "--output", help="output path")
+    args = parser.parse_args()
+
+    pdf_path = resolve_input(args.pdf)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else pdf_path.with_name(f"{pdf_path.stem}_updated.pdf")
+    )
+
+    replace_text(pdf_path, output_path, args.text, args.replacement)
+    print(f"Done. Updated PDF saved as {output_path}")
+
+
+if __name__ == "__main__":
+    main()
