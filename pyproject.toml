@@ -2,7 +2,7 @@
 name = "pdf-word-substituter"
 version = "0.1.0"
 description = "Add your description here"
-readme = "readme.md"
+readme = "README.md"
 authors = [
     { name = "Nahuel", email = "nahuelseoane@gmail.com" }
 ]
