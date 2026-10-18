@@ -3,6 +3,8 @@
 Usage:
     uv run pdf-word-substituter receipt.pdf "Saldo de la cta cte: ARS -1.000,00"
     uv run pdf-word-substituter fc.pdf "ABONO SERVICIO DE" "SERVICIO DE LIMPIEZA"
+    uv run pdf-word-substituter fc.pdf -r "2025" "2026" -d "Saldo: ARS 100,00"
+    uv run pdf-word-substituter fc.pdf -f rules.txt
 
 If the replacement is left out, the text is removed. If the PDF isn't found
 as given, it is looked up in DEFAULT_FOLDER. The result is saved next to the
@@ -68,6 +70,18 @@ def find_span(page: pymupdf.Page, rect: pymupdf.Rect) -> dict | None:
     return None
 
 
+def search_exact(
+    page: pymupdf.Page, text: str, ignore_case: bool = False
+) -> list[pymupdf.Rect]:
+    """Find `text` on the page. PyMuPDF's search ignores capital letters, so
+    unless `ignore_case` is set, keep only matches that are written exactly
+    the same (removing "Haedo" must not also remove "HAEDO")."""
+    rects = page.search_for(text)
+    if ignore_case:
+        return rects
+    return [r for r in rects if page.get_textbox(r).strip() == text.strip()]
+
+
 def resolve_input(path_arg: str) -> Path:
     path = Path(path_arg)
     if path.suffix.lower() != ".pdf":
@@ -79,65 +93,147 @@ def resolve_input(path_arg: str) -> Path:
     return path
 
 
-def replace_text(pdf_path: Path, output_path: Path, old: str, new: str) -> int:
-    """Replace `old` with `new` (or remove it if `new` is empty).
+def replace_texts(
+    pdf_path: Path,
+    output_path: Path,
+    rules: list[tuple[str, str]],
+    ignore_case: bool = False,
+) -> tuple[list[int], list[int]]:
+    """Apply each (old, new) rule to the PDF; an empty `new` removes `old`.
 
-    Returns how many matches were changed. Nothing is saved if there are none.
+    All rules are matched against the original text, so one rule never
+    matches text inserted by another. Returns, per rule, how many matches
+    were changed and how many were skipped because an earlier rule already
+    changed that text. Nothing is saved if no rule matched.
     """
     doc = pymupdf.open(pdf_path)
-    total = 0
+    counts = [0] * len(rules)
+    skipped = [0] * len(rules)
 
     for page in doc:
-        rects = page.search_for(old)
-        if not rects:
+        # (rect, span, new text) for every match of every rule on this page
+        matches = []
+        for i, (old, new) in enumerate(rules):
+            for rect in search_exact(page, old, ignore_case):
+                # Skip text already claimed by an earlier rule
+                if any(rect.intersects(m[0]) for m in matches):
+                    skipped[i] += 1
+                    continue
+                # Read font and position now, while the old text still exists
+                matches.append((rect, find_span(page, rect), new))
+                counts[i] += 1
+        if not matches:
             continue
-        total += len(rects)
-
-        # Read font and position before deleting, while the old text still exists
-        spans = [find_span(page, rect) for rect in rects]
 
         # Delete the old text from the PDF itself (not just cover it), so it
         # can't be found, selected or copied. Images and lines are left alone.
-        for rect in rects:
+        for rect, _, _ in matches:
             page.add_redact_annot(rect, fill=False)
         page.apply_redactions(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
         )
 
-        if not new:
-            continue
-        for rect, span in zip(rects, spans):
+        for rect, span, new in matches:
+            if not new:
+                continue
             detected_font = span["font"] if span else "helv"
             font_size = span["size"] if span else 8
             baseline = span["origin"][1] if span else rect.y1 - 2
-            font_name = choose_fallback_font(detected_font)
-            print(f"Detected PDF font: {detected_font} -> Using: {font_name}")
             page.insert_text(
                 (rect.x0 + x_offset, baseline + y_offset),
                 new,
                 fontsize=font_size,
-                fontname=font_name,
+                fontname=choose_fallback_font(detected_font),
                 color=(0, 0, 0),
             )
 
-    if total:
+    if any(counts):
         # garbage=4 drops unused objects (like the old, pre-redaction page
         # content), otherwise removed text can still be recovered from the file.
         doc.save(output_path, garbage=4, deflate=True, clean=True)
     doc.close()
-    return total
+    return counts, skipped
+
+
+def replace_text(
+    pdf_path: Path, output_path: Path, old: str, new: str, ignore_case: bool = False
+) -> int:
+    """Single-rule version of replace_texts. Returns the number of matches."""
+    counts, _ = replace_texts(pdf_path, output_path, [(old, new)], ignore_case)
+    return counts[0]
+
+
+def read_rules_file(path_arg: str) -> list[tuple[str, str]]:
+    """Read rules, one per line: "old => new", or "old" alone to remove it.
+
+    Blank lines and lines starting with # are ignored. Spaces around each
+    side are trimmed.
+    """
+    path = Path(path_arg)
+    if not path.exists():
+        sys.exit(f"Rules file not found: {path_arg}")
+    rules = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        old, _, new = line.partition("=>")
+        if old.strip():
+            rules.append((old.strip(), new.strip()))
+    return rules
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replace or remove text in a PDF.")
+    parser = argparse.ArgumentParser(
+        description="Replace or remove text in a PDF.",
+        epilog="Rules from TEXT, -r, -d and -f can be combined in one run.",
+    )
     parser.add_argument("pdf", help="PDF file (name or path)")
-    parser.add_argument("text", help="exact text to find")
+    parser.add_argument("text", nargs="?", help="exact text to find")
     parser.add_argument(
         "replacement", nargs="?", default="", help="new text (omit to remove)"
     )
+    parser.add_argument(
+        "-r",
+        "--replace",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("OLD", "NEW"),
+        help="replace OLD with NEW (repeatable)",
+    )
+    parser.add_argument(
+        "-d",
+        "--remove",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="remove TEXT (repeatable)",
+    )
+    parser.add_argument(
+        "-f",
+        "--rules-file",
+        metavar="FILE",
+        help='file with one rule per line: "old => new", or "old" to remove',
+    )
+    parser.add_argument(
+        "-i",
+        "--ignore-case",
+        action="store_true",
+        help='also match different capitals ("Haedo" matches "HAEDO")',
+    )
     parser.add_argument("-o", "--output", help="output path")
     args = parser.parse_args()
+
+    rules: list[tuple[str, str]] = []
+    if args.text:
+        rules.append((args.text, args.replacement))
+    rules += [(old, new) for old, new in args.replace]
+    rules += [(text, "") for text in args.remove]
+    if args.rules_file:
+        rules += read_rules_file(args.rules_file)
+    if not rules:
+        parser.error("nothing to do: give TEXT, -r, -d or -f")
 
     pdf_path = resolve_input(args.pdf)
     output_path = (
@@ -146,11 +242,26 @@ def main() -> None:
         else pdf_path.with_name(f"{pdf_path.stem}_updated.pdf")
     )
 
-    count = replace_text(pdf_path, output_path, args.text, args.replacement)
-    if not count:
+    counts, skipped = replace_texts(pdf_path, output_path, rules, args.ignore_case)
+
+    missing = 0
+    for (old, new), count, skip in zip(rules, counts, skipped):
+        if not count and skip:
+            print(f'  skipped    "{old}" (already changed by an earlier rule)')
+        elif not count:
+            missing += 1
+            print(f'  NOT FOUND  "{old}"')
+        elif new:
+            print(f'  replaced   "{old}" -> "{new}" ({count}x)')
+        else:
+            print(f'  removed    "{old}" ({count}x)')
+
+    if not any(counts):
         sys.exit(
-            f'Text not found in {pdf_path.name}: "{args.text}"\n'
-            "Nothing was saved. Check spelling, spaces and capital letters."
+            f"No text found in {pdf_path.name}. Nothing was saved.\n"
+            "Check spelling, spaces and capital letters."
         )
-    action = "Replaced" if args.replacement else "Removed"
-    print(f"{action} {count} match(es). Updated PDF saved as {output_path}")
+    print(f"Updated PDF saved as {output_path}")
+    if missing:
+        # Exit with an error so a missed rule (e.g. a typo) isn't overlooked
+        sys.exit(f"WARNING: {missing} rule(s) not found; the rest were applied.")
