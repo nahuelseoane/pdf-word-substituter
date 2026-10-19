@@ -28,6 +28,7 @@ Unlike tools that paint a white box over the old text, this one **deletes it fro
 - **Never touches the original**: the result is saved as a new file, `<name>_updated.pdf`.
 - **Catches typos**: if some text isn't found, it tells you which, and if nothing was found it saves nothing.
 - **Exact matching**: removing "Haedo" won't touch "HAEDO" unless you ask it to.
+- **Target one spot with its label**: `"CUIT: -" => "CUIT: 20-12345678-9"` fills in that one "-" and leaves every other "-" in the file alone.
 - Works on every page and every match in the document.
 
 ---
@@ -140,9 +141,19 @@ uv run pdf-word-substituter-gui
 
 On WSL the window opens through WSLg (Windows 11), with no extra setup.
 
+### Changing a value next to a label
+
+Short values like `-` or `0` usually appear many times in a document. To change just one, include the label in front of it, and repeat the label in the replacement:
+
+```text
+CUIT: - => CUIT: 20-12345678-9
+```
+
+Only the words that differ are changed: "CUIT:" stays as it is, and the number is written exactly where the "-" was, keeping the document's layout. This works even when the label and the value are far apart on the line, such as in separate columns. To add text after a label, just extend it: `Consumidor Final => Consumidor Final (CF)`.
+
 ### Tips
 
-- The search is **exact**: spaces, accents and capital letters must match (use `-i` to ignore capitals). If you're not sure, copy the text straight from the PDF viewer.
+- The search is **exact**: every character, including accents and capital letters, must match (use `-i` to ignore capitals). Extra spaces between words don't matter. If you're not sure, copy the text straight from the PDF viewer.
 - If the file isn't found where you said, it's looked up in `DEFAULT_FOLDER`. Change that to your usual folder (e.g. Downloads) at the top of `src/pdf_word_substituter/substitute.py`.
 - If the new text sits slightly off, nudge it with `x_offset` / `y_offset` in the same file.
 
@@ -150,10 +161,10 @@ On WSL the window opens through WSLg (Windows 11), with no extra setup.
 
 ## How it works
 
-1. Finds every match of every change on each page. All changes are matched against the original text, so one change never affects text written by another.
+1. Finds every match of every change on each page: whole words that sit next to each other on a line (even if the PDF stores them as separate pieces), or text inside a word. All changes are matched against the original text, so one change never affects text written by another.
 2. Reads the font, size and position of each match while it still exists.
-3. Deletes the matched text using PDF redaction. Images and lines are left untouched.
-4. If there's a replacement, writes it at the same position with the closest standard font.
+3. Keeps any words that the old and new text share at the start or end, and deletes the rest using PDF redaction. Images and lines are left untouched.
+4. If there's a replacement, writes the new words where the deleted ones were, with the closest standard font.
 5. Saves with cleanup enabled, so the old page content isn't kept hidden inside the file.
 
 ## Limitations

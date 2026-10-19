@@ -12,7 +12,9 @@ original as "<name>_updated.pdf" unless -o is given.
 """
 
 import argparse
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
@@ -61,13 +63,18 @@ def choose_fallback_font(original_font_name: str) -> str:
 
 
 def find_span(page: pymupdf.Page, rect: pymupdf.Rect) -> dict | None:
-    """Return the text span (font, size, baseline) that the found text is in."""
+    """Return the text span (font, size, baseline) that the found text is in,
+    picking the one that overlaps it the most."""
+    best, best_area = None, 0.0
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
             for span in line.get("spans", []):
-                if span["text"].strip() and rect.intersects(span["bbox"]):
-                    return span
-    return None
+                if not span["text"].strip():
+                    continue
+                area = (rect & pymupdf.Rect(span["bbox"])).get_area()
+                if area > best_area:
+                    best, best_area = span, area
+    return best
 
 
 def search_exact(
@@ -80,6 +87,126 @@ def search_exact(
     if ignore_case:
         return rects
     return [r for r in rects if page.get_textbox(r).strip() == text.strip()]
+
+
+Word = tuple[str, pymupdf.Rect]
+
+
+def visual_lines(page: pymupdf.Page) -> list[list[Word]]:
+    """Group the page's words into lines as they look on screen, left to right.
+
+    Words that sit side by side end up on the same line even when the PDF
+    stores them as separate pieces (like "CUIT:" and its value in another
+    column), which a plain search can't match as one phrase.
+    """
+    words = sorted(
+        ((w[4], pymupdf.Rect(w[:4])) for w in page.get_text("words")),
+        key=lambda w: (w[1].y0 + w[1].y1) / 2,
+    )
+    lines: list[list[Word]] = []
+    line_center = 0.0
+    for text, rect in words:
+        center = (rect.y0 + rect.y1) / 2
+        if lines and abs(center - line_center) <= rect.height * 0.3:
+            lines[-1].append((text, rect))
+        else:
+            lines.append([(text, rect)])
+            line_center = center
+    for line in lines:
+        line.sort(key=lambda w: w[1].x0)
+    return lines
+
+
+def find_word_sequences(
+    lines: list[list[Word]], tokens: list[str], ignore_case: bool
+) -> list[list[pymupdf.Rect]]:
+    """Find whole words `tokens` next to each other on one line. Returns one
+    rect per word for each match."""
+    norm = str.casefold if ignore_case else str
+    want = [norm(t) for t in tokens]
+    found = []
+    for line in lines:
+        texts = [norm(t) for t, _ in line]
+        i = 0
+        while i + len(want) <= len(texts):
+            if texts[i : i + len(want)] == want:
+                found.append([r for _, r in line[i : i + len(want)]])
+                i += len(want)
+            else:
+                i += 1
+    return found
+
+
+def find_matches(
+    page: pymupdf.Page, old: str, ignore_case: bool, lines: list[list[Word]]
+) -> list[tuple[list[pymupdf.Rect], bool]]:
+    """All matches of `old` on the page, as (rects, one_rect_per_word).
+
+    Whole words are matched along visual lines first; the plain search then
+    adds matches inside words (like "-35.344" in "-35.344.754,00").
+    """
+    tokens = old.split()
+    if not tokens:
+        return []
+    matches = [(r, True) for r in find_word_sequences(lines, tokens, ignore_case)]
+    for rect in search_exact(page, old, ignore_case):
+        if not any(rect.intersects(r) for rects, _ in matches for r in rects):
+            matches.append(([rect], False))
+    return matches
+
+
+@dataclass
+class Change:
+    claim: list[pymupdf.Rect]  # all of the matched text
+    delete: list[pymupdf.Rect]  # the part that actually changes
+    text: str  # what to write ("" = nothing)
+    x: float
+    baseline: float
+    font: str
+    size: float
+
+
+def plan_change(
+    page: pymupdf.Page, rects: list[pymupdf.Rect], per_word: bool, old: str, new: str
+) -> Change:
+    """Work out what to delete and what to write for one match.
+
+    Words that old and new share at the start or end are left as they are,
+    so "CUIT: -" => "CUIT: 20-12345678-9" only swaps the "-" for the number,
+    in the spot where the "-" was.
+    """
+    keep_start = keep_end = 0
+    delete, text = rects, new
+    if per_word and new:
+        old_words, new_words = old.split(), new.split()
+        shortest = min(len(old_words), len(new_words))
+        while keep_start < shortest and old_words[keep_start] == new_words[keep_start]:
+            keep_start += 1
+        while (
+            keep_end < shortest - keep_start
+            and old_words[-1 - keep_end] == new_words[-1 - keep_end]
+        ):
+            keep_end += 1
+        delete = rects[keep_start : len(rects) - keep_end]
+        # The changed words of `new`, with the spacing the user typed
+        spans = [m.span() for m in re.finditer(r"\S+", new)]
+        last = len(spans) - keep_end - 1
+        text = new[spans[keep_start][0] : spans[last][1]] if keep_start <= last else ""
+
+    anchor = delete[0] if delete else rects[max(keep_start - 1, 0)]
+    span = find_span(page, anchor)
+    font = choose_fallback_font(span["font"]) if span else "helv"
+    size = span["size"] if span else 8
+    baseline = span["origin"][1] if span else anchor.y1 - 2
+
+    space = pymupdf.get_text_length(" ", font, size)
+    if delete:  # write where the old text was
+        x = delete[0].x0
+    elif keep_start:  # only adding: write after the kept words
+        x = rects[keep_start - 1].x1 + space
+    else:  # only adding, before the kept words
+        x = rects[0].x0 - space - pymupdf.get_text_length(text, font, size)
+    return Change(rects, delete, text, x, baseline, font, size)
 
 
 def resolve_input(path_arg: str) -> Path:
@@ -113,42 +240,39 @@ def replace_texts(
     skipped = [0] * len(rules)
 
     for page in doc:
-        # (rect, span, new text) for every match of every rule on this page
-        matches = []
+        lines = visual_lines(page)
+        changes: list[Change] = []
         for i, (old, new) in enumerate(rules):
-            for rect in search_exact(page, old, ignore_case):
+            for rects, per_word in find_matches(page, old, ignore_case, lines):
                 # Skip text already claimed by an earlier rule
-                if any(rect.intersects(m[0]) for m in matches):
+                claimed = [c for ch in changes for c in ch.claim]
+                if any(r.intersects(c) for r in rects for c in claimed):
                     skipped[i] += 1
                     continue
-                # Read font and position now, while the old text still exists
-                matches.append((rect, find_span(page, rect), new))
+                # Plan now, while the old text (and its font) still exists
+                changes.append(plan_change(page, rects, per_word, old, new))
                 counts[i] += 1
-        if not matches:
-            continue
 
         # Delete the old text from the PDF itself (not just cover it), so it
         # can't be found, selected or copied. Images and lines are left alone.
-        for rect, _, _ in matches:
+        to_delete = [r for ch in changes for r in ch.delete]
+        for rect in to_delete:
             page.add_redact_annot(rect, fill=False)
-        page.apply_redactions(
-            images=pymupdf.PDF_REDACT_IMAGE_NONE,
-            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-        )
-
-        for rect, span, new in matches:
-            if not new:
-                continue
-            detected_font = span["font"] if span else "helv"
-            font_size = span["size"] if span else 8
-            baseline = span["origin"][1] if span else rect.y1 - 2
-            page.insert_text(
-                (rect.x0 + x_offset, baseline + y_offset),
-                new,
-                fontsize=font_size,
-                fontname=choose_fallback_font(detected_font),
-                color=(0, 0, 0),
+        if to_delete:
+            page.apply_redactions(
+                images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             )
+
+        for ch in changes:
+            if ch.text:
+                page.insert_text(
+                    (ch.x + x_offset, ch.baseline + y_offset),
+                    ch.text,
+                    fontsize=ch.size,
+                    fontname=ch.font,
+                    color=(0, 0, 0),
+                )
 
     if any(counts):
         # garbage=4 drops unused objects (like the old, pre-redaction page
