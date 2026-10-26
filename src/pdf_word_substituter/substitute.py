@@ -282,6 +282,19 @@ def replace_texts(
     return counts, skipped
 
 
+def has_text(pdf_path: Path) -> bool:
+    """False when the PDF has no text in it, only pictures (like a scan or a
+    photo of a receipt). Text in a picture can't be found or changed."""
+    with pymupdf.open(pdf_path) as doc:
+        return any(page.get_text().strip() for page in doc)
+
+
+NO_TEXT_MESSAGE = (
+    "This PDF has no text in it, only a picture (like a scan or a photo), "
+    "so its words can't be found or changed."
+)
+
+
 def replace_text(
     pdf_path: Path, output_path: Path, old: str, new: str, ignore_case: bool = False
 ) -> int:
@@ -401,6 +414,8 @@ def main() -> None:
         print(f"  {line}")
 
     if not any(counts):
+        if not has_text(pdf_path):
+            sys.exit(f"{pdf_path.name}: {NO_TEXT_MESSAGE} Nothing was saved.")
         sys.exit(
             f"No text found in {pdf_path.name}. Nothing was saved.\n"
             "Check spelling, spaces and capital letters."

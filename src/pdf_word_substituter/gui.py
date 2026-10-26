@@ -7,7 +7,14 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .substitute import DEFAULT_FOLDER, parse_rules, replace_texts, summarize
+from .substitute import (
+    DEFAULT_FOLDER,
+    NO_TEXT_MESSAGE,
+    has_text,
+    parse_rules,
+    replace_texts,
+    summarize,
+)
 
 PAD = 8
 
@@ -219,7 +226,9 @@ class App:
             self.root.config(cursor="")
 
         lines, missing = summarize(rules, counts, skipped)
-        if not any(counts):
+        if not any(counts) and not has_text(pdf):
+            self.show_result(f"{NO_TEXT_MESSAGE} Nothing was saved.", "red", lines)
+        elif not any(counts):
             self.show_result(
                 "No text found. Nothing was saved. "
                 "Check spelling, spaces and capital letters.",
